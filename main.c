@@ -9,7 +9,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
-
+#include <sys/time.h>
 
 #define BUFSIZE		64
 #define ICMP_ECHO	8
@@ -72,41 +72,44 @@ static unsigned short calcul_checksum(void *b, int len) {
 	return (unsigned short)(~sum);
 }
 
+void	init_icmp_echo_request(struct icmphdr *icmp, char buf[], u_int16_t *seq) {
+
+	icmp->type = ICMP_ECHO;
+	icmp->code = 0;
+	icmp->checksum = 0;
+	icmp->un.echo.id = getpid() & 0xFFFF;
+	icmp->un.echo.sequence = htons((*seq)++);
+	icmp->checksum = calcul_checksum(buf, sizeof(struct icmphdr) + sizeof(struct timeval));
+}
 
 int	main()
 {
 	struct sockaddr_in src, dst = {0};
 	int socket_fd;
 	char buf[BUFSIZE];
-	int seq = 1;
+	u_int16_t seq = -1;
+	
 	src.sin_family = AF_INET;
 	src.sin_addr.s_addr = INADDR_ANY;
-
+	
 	dst.sin_family = AF_INET;
 	inet_pton(AF_INET, "8.8.8.8", &dst.sin_addr);
-
+	
 	socket_fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
 	if (socket_fd == -1) {
 		fprintf(stderr, "socket error: %s\n", strerror(errno));
 		return 1;
 	}
-
+	
 	memset(buf, 0, BUFSIZE);
-
 	struct icmphdr *icmp = (struct icmphdr *)buf;
 
-	icmp->type = ICMP_ECHO;
-	icmp->code = 0;
-	icmp->checksum = 0;
-	icmp->un.echo.id = getpid() & 0xFFFF;
-	icmp->un.echo.sequence = seq;
-
-	icmp->checksum = calcul_checksum(buf, sizeof(struct icmphdr));
-
+	printf("PING 8.8.8.8 (8.8.8.8): %lu data bytes\n", sizeof(struct icmphdr) + sizeof(struct timeval));
 	while (1)
 	{
-		int send_ping = sendto(socket_fd, buf, sizeof(struct icmphdr), 0, (struct sockaddr *)&dst, sizeof(dst));
-			
+		init_icmp_echo_request(icmp, buf, &seq);
+		// gettimeofday(tstmap, NULL);
+		int send_ping = sendto(socket_fd, buf, sizeof(struct icmphdr), 0, (struct sockaddr *)&dst, sizeof(dst));	
 		if (send_ping < 0) {
 			fprintf(stderr, "send error: %s\n", strerror(errno));
 			return 1;
@@ -121,13 +124,17 @@ int	main()
 			fprintf(stderr, "recv error: %s\n", strerror(errno));
 			return 1;
 		}
-		
+
 		struct iphdr *ip = (struct iphdr *)rbuf;
 		struct icmphdr *icmp_reply = (struct icmphdr *)(rbuf + (ip->ihl * 4));
 
-		printf("type: %d\n", icmp_reply->type);
-		printf("seq: %d\n", icmp_reply->un.echo.sequence);
-		printf("ttl: %d\n", ip->ttl);
+		if (icmp_reply->type == 0){
+			struct in_addr addr;
+			addr.s_addr = ip->saddr;
+			printf("%lu bytes from %s icmp_seq=%d ttl=%d time=0 ms\n", sizeof(rbuf), inet_ntoa(addr), seq, ip->ttl);
+
+		}
+
 		sleep(1);
 	}
 
