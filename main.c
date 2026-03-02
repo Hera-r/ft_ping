@@ -72,14 +72,24 @@ static unsigned short calcul_checksum(void *b, int len) {
 	return (unsigned short)(~sum);
 }
 
-void	init_icmp_echo_request(struct icmphdr *icmp, char buf[], u_int16_t *seq) {
+u_int16_t	init_icmp_echo_request(struct icmphdr *icmp, char buf[], u_int16_t *seq) {
 
+	
 	icmp->type = ICMP_ECHO;
 	icmp->code = 0;
 	icmp->checksum = 0;
 	icmp->un.echo.id = getpid() & 0xFFFF;
-	icmp->un.echo.sequence = htons((*seq)++);
+
+	u_int16_t current_seq = *seq;
+	icmp->un.echo.sequence = htons(current_seq);
+
+	struct timeval *tv = (struct timeval *)(buf + sizeof(struct icmphdr));
+	gettimeofday(tv, NULL);
+
 	icmp->checksum = calcul_checksum(buf, sizeof(struct icmphdr) + sizeof(struct timeval));
+	(*seq)++;
+
+	return current_seq;
 }
 
 int	main()
@@ -87,7 +97,7 @@ int	main()
 	struct sockaddr_in src, dst = {0};
 	int socket_fd;
 	char buf[BUFSIZE];
-	u_int16_t seq = -1;
+	u_int16_t seq = 0;
 	
 	src.sin_family = AF_INET;
 	src.sin_addr.s_addr = INADDR_ANY;
@@ -104,22 +114,26 @@ int	main()
 	memset(buf, 0, BUFSIZE);
 	struct icmphdr *icmp = (struct icmphdr *)buf;
 
-	printf("PING 8.8.8.8 (8.8.8.8): %lu data bytes\n", sizeof(struct icmphdr) + sizeof(struct timeval));
+	printf("PING 8.8.8.8 (8.8.8.8): %lu data bytes\n",
+	       sizeof(struct icmphdr) + sizeof(struct timeval));
+
 	while (1)
 	{
-		init_icmp_echo_request(icmp, buf, &seq);
-		// gettimeofday(tstmap, NULL);
-		int send_ping = sendto(socket_fd, buf, sizeof(struct icmphdr), 0, (struct sockaddr *)&dst, sizeof(dst));	
+		u_int16_t sent_seq = init_icmp_echo_request(icmp, buf, &seq);
+
+		ssize_t send_ping = sendto(socket_fd, buf,
+		                           sizeof(struct icmphdr) + sizeof(struct timeval),
+		                           0, (struct sockaddr *)&dst, sizeof(dst));
 		if (send_ping < 0) {
 			fprintf(stderr, "send error: %s\n", strerror(errno));
 			return 1;
 		}
-		
+
 		char rbuf[BUFSIZE];
 		socklen_t len_dst = sizeof(struct sockaddr_in);
 		
 		memset(rbuf, 0, BUFSIZE);
-		int recv_ping = recvfrom(socket_fd, rbuf, sizeof(rbuf), 0, (struct sockaddr *)&src, &len_dst);
+		ssize_t recv_ping = recvfrom(socket_fd, rbuf, sizeof(rbuf), 0, (struct sockaddr *)&src, &len_dst);
 		if (recv_ping < 0) {
 			fprintf(stderr, "recv error: %s\n", strerror(errno));
 			return 1;
@@ -127,12 +141,29 @@ int	main()
 
 		struct iphdr *ip = (struct iphdr *)rbuf;
 		struct icmphdr *icmp_reply = (struct icmphdr *)(rbuf + (ip->ihl * 4));
+		struct in_addr addr;
+		addr.s_addr = ip->saddr;
 
-		if (icmp_reply->type == 0){
-			struct in_addr addr;
-			addr.s_addr = ip->saddr;
-			printf("%lu bytes from %s icmp_seq=%d ttl=%d time=0 ms\n", sizeof(rbuf), inet_ntoa(addr), seq, ip->ttl);
+		if (icmp_reply->type == ICMP_ECHOREPLY) {
 
+			if ((ssize_t)recv_ping >= (ssize_t)(ip->ihl * 4 + sizeof(struct icmphdr) + sizeof(struct timeval))) {
+				struct timeval *tv_sent = (struct timeval *)(rbuf + (ip->ihl * 4) + sizeof(struct icmphdr));
+				struct timeval tv_now;
+				gettimeofday(&tv_now, NULL);
+
+				long rtt_ms = (tv_now.tv_sec - tv_sent->tv_sec) * 1000
+				              + (tv_now.tv_usec - tv_sent->tv_usec + 1000000) % 1000000 / 1000;
+
+				printf("%zd bytes from %s icmp_seq=%d ttl=%d time=%ld ms\n",
+				       recv_ping, inet_ntoa(addr), sent_seq, ip->ttl, rtt_ms);
+			} else {
+				printf("%zd bytes from %s icmp_seq=%d ttl=%d (payload missing)\n",
+				       recv_ping, inet_ntoa(addr), sent_seq, ip->ttl);
+			}
+
+		} else {
+			printf("%zd bytes from %s icmp_type=%d icmp_code=%d\n",
+			       recv_ping, inet_ntoa(addr), icmp_reply->type, icmp_reply->code);
 		}
 
 		sleep(1);
